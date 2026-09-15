@@ -109,18 +109,17 @@ class BatchAllTripletLoss(nn.Module):
         # Get the pairwise distance matrix
         pairwise_dist = self.distance_metric(embeddings)
 
-        anchor_positive_dist = pairwise_dist.unsqueeze(2)
-        anchor_negative_dist = pairwise_dist.unsqueeze(1)
-
-        # Compute a 3D tensor of size (batch_size, batch_size, batch_size)
-        # triplet_loss[i, j, k] will contain the triplet loss of anchor=i, positive=j, negative=k
-        # Uses broadcasting where the 1st argument has shape (batch_size, batch_size, 1)
-        # and the 2nd (batch_size, 1, batch_size)
+        # Only valid anchor-positive pairs need to be compared with the negatives. With K
+        # samples per label this uses B * (K - 1) rows instead of allocating a B x B x B cube.
+        anchor_indices, positive_indices = BatchHardTripletLoss.get_anchor_positive_triplet_mask(labels).nonzero(
+            as_tuple=True
+        )
+        anchor_positive_dist = pairwise_dist[anchor_indices, positive_indices].unsqueeze(1)
+        anchor_negative_dist = pairwise_dist[anchor_indices]
         triplet_loss = anchor_positive_dist - anchor_negative_dist + self.triplet_margin
 
-        # Put to zero the invalid triplets
-        # (where label(a) != label(p) or label(n) == label(a) or a == p)
-        mask = BatchHardTripletLoss.get_triplet_mask(labels)
+        # A negative must have a different label from the anchor (and therefore the positive).
+        mask = labels[anchor_indices].unsqueeze(1) != labels.unsqueeze(0)
         triplet_loss = mask.float() * triplet_loss
 
         # Remove negative losses (i.e. the easy triplets)
