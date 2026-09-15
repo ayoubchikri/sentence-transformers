@@ -450,8 +450,15 @@ def quantize_embeddings(
         # buckets across all matrices (from `ranges` / `calibration_embeddings`, else all tokens together) so
         # values quantize consistently across matrices.
         if isinstance(embeddings[0], np.ndarray) and embeddings[0].ndim == 2:
-            if precision.endswith("int8") and ranges is None and calibration_embeddings is None:
-                calibration_embeddings = np.concatenate(embeddings, axis=0)
+            if precision.endswith("int8") and ranges is None:
+                if calibration_embeddings is None:
+                    calibration_embeddings = np.concatenate(embeddings, axis=0)
+                # Compute shared buckets once, rather than scanning the calibration corpus for every document.
+                # An all-empty corpus needs no buckets; each matrix takes the empty-output path below.
+                if len(calibration_embeddings):
+                    ranges = np.vstack(
+                        (np.min(calibration_embeddings, axis=0), np.max(calibration_embeddings, axis=0))
+                    )
             return [
                 quantize_embeddings(
                     matrix, precision=precision, ranges=ranges, calibration_embeddings=calibration_embeddings
