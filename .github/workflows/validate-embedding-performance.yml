@@ -1,0 +1,91 @@
+name: Validate embedding performance fixes
+
+on:
+  push:
+    branches: [verify/embedding-performance]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - change: quantization
+            commit: 99575e16038959a2f3b0ee518ffd7204f11dd85c
+            source: sentence_transformers/util/quantization.py
+            regression: tests/util/test_quantization.py
+            selection: calibrates_once
+            failures: 8
+            tests: tests/util/test_quantization.py tests/util/test_similarity.py tests/util/test_tensor.py
+          - change: triplet
+            commit: 4414a5ef9e63842c529bdf26f48416cee1c2934e
+            source: sentence_transformers/sentence_transformer/losses/batch_semi_hard_triplet.py
+            regression: tests/sentence_transformer/losses/test_triplet.py
+            selection: semi_hard_triplet_saved_tensors_are_quadratic
+            failures: 1
+            tests: tests/sentence_transformer/losses/test_triplet.py
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      SOURCE: ${{ matrix.source }}
+      REGRESSION: ${{ matrix.regression }}
+      SELECTION: ${{ matrix.selection }}
+      EXPECTED_FAILURES: ${{ matrix.failures }}
+      TEST_PATHS: ${{ matrix.tests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.commit }}
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e . transformers==5.0.0 numpy==1.26.4 pytest pytest-env pytest-subtests faiss-cpu usearch
+      - name: Verify regressions fail against upstream code
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+          source = Path(os.environ['SOURCE'])
+          fixed = source.read_bytes()
+          baseline = subprocess.check_output([
+              'git', 'show', '94d68cf9cca6498d54e4c0d3f84532cbd33a7a9f:' + str(source)
+          ])
+          try:
+              source.write_bytes(baseline)
+              result = subprocess.run([
+                  sys.executable, '-m', 'pytest', os.environ['REGRESSION'],
+                  '-k', os.environ['SELECTION'], '-q', '--tb=short', '--junitxml=baseline.xml'
+              ])
+              report = ET.parse('baseline.xml')
+              failures = report.findall('.//testcase/failure')
+              errors = report.findall('.//testcase/error')
+              assert result.returncode == 1, result.returncode
+              assert not errors, errors
+              assert len(failures) == int(os.environ['EXPECTED_FAILURES']), len(failures)
+          finally:
+              source.write_bytes(fixed)
+      - name: Test the exact PR commit
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import sys
+          import torch
+          import transformers
+          print('torch:', torch.__version__, 'transformers:', transformers.__version__, flush=True)
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          subprocess.run([sys.executable, '-m', 'pytest', *os.environ['TEST_PATHS'].split(), '-q', '--tb=short'], check=True)
