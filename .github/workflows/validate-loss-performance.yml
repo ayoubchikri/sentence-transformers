@@ -1,0 +1,94 @@
+name: Validate triplet and CoSENT performance
+
+on:
+  push:
+    branches: [verify/triplet-cosent-performance]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - change: batch-all
+            commit: cbd96f97ce2d9879057f7530493bbafb513e34c6
+            source: sentence_transformers/sentence_transformer/losses/batch_all_triplet.py
+            regression: tests/sentence_transformer/losses/test_batch_all_triplet.py
+            selection: does_not_save_a_cube
+            tests: tests/sentence_transformer/losses/test_batch_all_triplet.py tests/sentence_transformer/losses/test_triplet.py
+            test_filter: ''
+          - change: cosent
+            commit: 6b4588eca475169875ef2db6ddd5844a0d1359dc
+            source: sentence_transformers/sentence_transformer/losses/cosent.py
+            regression: tests/sentence_transformer/losses/test_cosent.py
+            selection: does_not_save_a_pairwise_score_matrix
+            tests: tests/sentence_transformer/losses/test_cosent.py tests/sparse_encoder/losses/test_sparse_cosent.py tests/sentence_transformer/losses/test_merged_forward.py
+            test_filter: cosent
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      SOURCE_FILE: ${{ matrix.source }}
+      REGRESSION: ${{ matrix.regression }}
+      SELECTION: ${{ matrix.selection }}
+      TEST_PATHS: ${{ matrix.tests }}
+      TEST_FILTER: ${{ matrix.test_filter }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.commit }}
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e '.[train]' transformers==5.0.0 numpy==1.26.4 pytest pytest-env pytest-subtests
+      - name: Reproduce memory regression against upstream
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+
+          source = Path(os.environ['SOURCE_FILE'])
+          fixed = source.read_bytes()
+          try:
+              source.write_bytes(subprocess.check_output([
+                  'git', 'show', '88c667a5ffde5f842541692d2fdf2ca4d589a812:' + str(source)
+              ]))
+              result = subprocess.run([
+                  sys.executable, '-m', 'pytest', os.environ['REGRESSION'], '-k',
+                  os.environ['SELECTION'], '-q', '--tb=short', '--junitxml=baseline.xml'
+              ])
+              report = ET.parse('baseline.xml')
+              assert result.returncode == 1, result.returncode
+              assert not report.findall('.//testcase/error')
+              assert len(report.findall('.//testcase/failure')) == 1
+          finally:
+              source.write_bytes(fixed)
+      - name: Test the exact PR commit
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import sys
+          import torch
+          import transformers
+
+          print('torch:', torch.__version__, 'transformers:', transformers.__version__, flush=True)
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          command = [sys.executable, '-m', 'pytest', *os.environ['TEST_PATHS'].split(), '-q', '--tb=short']
+          if os.environ['TEST_FILTER']:
+              command += ['-k', os.environ['TEST_FILTER']]
+          subprocess.run(command, check=True)
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
