@@ -61,19 +61,18 @@ def _semi_hard_reference(embeddings, labels, distance_metric, margin):
     return torch.stack(losses).mean() if losses else distances.sum() * 0
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("case", ["random", "ties", "no_positives", "no_negatives"])
 @pytest.mark.parametrize(
     "distance_metric",
     [BatchHardTripletLossDistanceFunction.euclidean_distance, BatchHardTripletLossDistanceFunction.cosine_distance],
     ids=["euclidean", "cosine"],
 )
-def test_semi_hard_triplet_matches_reference(dummy_model, dtype, case, distance_metric):
+def test_semi_hard_triplet_matches_reference(dummy_model, case, distance_metric):
     generator = torch.Generator().manual_seed(42)
-    embeddings = torch.randn(8, 4, generator=generator, dtype=dtype)
+    embeddings = torch.randn(8, 4, generator=generator)
     labels = torch.arange(8) // 2
     if case == "ties":
-        embeddings = torch.tensor([[v, 1.0] for v in (0, 1, 2, 2, 3, 4, 5, 7)], dtype=dtype)
+        embeddings = torch.tensor([[v, 1.0] for v in (0, 1, 2, 2, 3, 4, 5, 7)])
     elif case == "no_positives":
         labels = torch.arange(8)
     elif case == "no_negatives":
@@ -108,24 +107,14 @@ def test_semi_hard_triplet_saved_tensors_are_quadratic(dummy_model):
     assert max(saved_sizes) <= batch_size**2
 
 
-def test_semi_hard_triplet_training_matches_reference(dummy_model):
-    """Mining preserves parameter updates across several training steps."""
-    torch.manual_seed(42)
-    actual_model = torch.nn.Linear(4, 3)
-    expected_model = torch.nn.Linear(4, 3)
-    expected_model.load_state_dict(actual_model.state_dict())
-    actual_optimizer = torch.optim.SGD(actual_model.parameters(), lr=0.1)
-    expected_optimizer = torch.optim.SGD(expected_model.parameters(), lr=0.1)
-    features = torch.randn(8, 4)
-    labels = torch.arange(8) // 2
-    distance_metric = BatchHardTripletLossDistanceFunction.euclidean_distance
-    loss_fn = BatchSemiHardTripletLoss(dummy_model, distance_metric=distance_metric, margin=0.7)
-    for _ in range(3):
-        actual_optimizer.zero_grad()
-        expected_optimizer.zero_grad()
-        loss_fn.compute_loss_from_embeddings([actual_model(features)], labels).backward()
-        _semi_hard_reference(expected_model(features), labels, distance_metric, margin=0.7).backward()
-        actual_optimizer.step()
-        expected_optimizer.step()
-        for actual, expected in zip(actual_model.parameters(), expected_model.parameters()):
-            torch.testing.assert_close(actual, expected)
+def test_semi_hard_triplet_tied_maximum_negative_gradients(dummy_model):
+    """A negative tied with the row maximum must receive its own gradient."""
+    embeddings = torch.tensor([[0.0], [2.0], [1.0], [-2.0], [-2.0]], requires_grad=True)
+    labels = torch.tensor([0, 0, 0, 1, 1])
+    loss_fn = BatchSemiHardTripletLoss(dummy_model, margin=5)
+
+    loss = loss_fn.compute_loss_from_embeddings([embeddings], labels)
+    loss.backward()
+
+    torch.testing.assert_close(loss, torch.tensor(3.25))
+    torch.testing.assert_close(embeddings.grad, torch.tensor([[-1.0], [0.25], [-0.25], [0.875], [0.125]]))

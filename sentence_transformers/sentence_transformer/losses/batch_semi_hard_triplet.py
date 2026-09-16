@@ -127,9 +127,7 @@ class BatchSemiHardTripletLoss(nn.Module):
         adjacency_not = ~adjacency
 
         batch_size = torch.numel(labels)
-        # Sort each anchor's negatives once, then locate the first distance strictly
-        # greater than each positive distance. This avoids a (batch_size**2, batch_size)
-        # distance tile and mask. Stable sorting preserves the first-index tie break.
+        # Sort and search to avoid cubic distance and mask tensors.
         negatives = pdist_matrix.masked_fill(adjacency, torch.inf)
         sorted_negatives = negatives.sort(dim=1, stable=True).values
         positions = torch.searchsorted(
@@ -150,15 +148,6 @@ class BatchSemiHardTripletLoss(nn.Module):
         ) / num_positives.clamp(min=1e-16)
 
         return triplet_loss
-
-    @staticmethod
-    def _masked_minimum(data: Tensor, mask: Tensor, dim: int = 1) -> Tensor:
-        axis_maximums, _ = data.max(dim, keepdims=True)
-        masked_minimums = (data - axis_maximums) * mask
-        masked_minimums, _ = masked_minimums.min(dim, keepdims=True)
-        masked_minimums += axis_maximums
-
-        return masked_minimums
 
     @staticmethod
     def _masked_maximum(data: Tensor, mask: Tensor, dim: int = 1) -> Tensor:
