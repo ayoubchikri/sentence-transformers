@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+import torch
 
 from sentence_transformers.util.quantization import (
     quantize_embeddings,
@@ -129,6 +131,37 @@ def test_quantize_empty_list_returns_empty_list() -> None:
         assert quantize_embeddings([], precision=precision) == []
 
 
+@pytest.mark.parametrize("precision", ["int8", "uint8"])
+@pytest.mark.parametrize("calibration_source", ["inputs", "calibration_embeddings", "ranges"])
+@pytest.mark.parametrize("as_tensors", [False, True])
+def test_quantize_multi_vector_calibrates_once(precision: str, calibration_source: str, as_tensors: bool) -> None:
+    """Ragged documents share one calibration scan, regardless of the number of documents."""
+    rng = np.random.default_rng(42)
+    matrices = [rng.standard_normal((length, 8)).astype(np.float32) for length in (0, 1, 3, 7)]
+    for matrix in matrices:
+        matrix[:, 0] = 2.0  # A constant dimension must still quantize correctly.
+    combined = np.concatenate(matrices)
+    calibration = combined if calibration_source == "inputs" else rng.uniform(-0.5, 0.5, (20, 8))
+    ranges = np.vstack((calibration.min(axis=0), calibration.max(axis=0)))
+    expected = quantize_embeddings(combined, precision, ranges=ranges)
+    kwargs = {}
+    if calibration_source == "calibration_embeddings":
+        kwargs["calibration_embeddings"] = calibration
+    elif calibration_source == "ranges":
+        kwargs["ranges"] = ranges
+
+    inputs = [torch.from_numpy(matrix) for matrix in matrices] if as_tensors else matrices
+    with patch.object(np, "min", wraps=np.min) as minimum, patch.object(np, "max", wraps=np.max) as maximum:
+        actual = quantize_embeddings(inputs, precision, **kwargs)
+
+    assert isinstance(actual, list)
+    assert [matrix.shape for matrix in actual] == [matrix.shape for matrix in matrices]
+    np.testing.assert_array_equal(np.concatenate(actual), expected)
+    expected_scans = 0 if calibration_source == "ranges" else 1
+    assert minimum.call_count == expected_scans
+    assert maximum.call_count == expected_scans
+
+
 skip_without_faiss = pytest.mark.skipif(importlib.util.find_spec("faiss") is None, reason="faiss not installed")
 skip_without_usearch = pytest.mark.skipif(importlib.util.find_spec("usearch") is None, reason="usearch not installed")
 
@@ -156,6 +189,31 @@ def test_semantic_search_faiss_rejects_unsupported_precision(corpus_precision: s
             corpus_precision=corpus_precision,
             top_k=2,
         )
+
+
+@skip_without_faiss
+@pytest.mark.parametrize("exact", [True, False])
+@pytest.mark.parametrize("corpus_precision", ["float32", "uint8"])
+def test_semantic_search_faiss_preserves_inner_product_metric(corpus_precision: str, exact: bool) -> None:
+    """Choosing approximate search must preserve inner-product rankings and scores."""
+    dtype = np.float32 if corpus_precision == "float32" else np.uint8
+    queries = np.array([[1, 0], [1, 1]], dtype=dtype)
+    corpus = np.array([[1, 0], [2, 0], [0, 3]], dtype=dtype)
+
+    results, _ = semantic_search_faiss(
+        queries,
+        corpus_embeddings=corpus,
+        corpus_precision=corpus_precision,
+        top_k=2,
+        rescore=False,
+        exact=exact,
+    )
+
+    # For the first query, [1, 0] is closest in L2 distance, but [2, 0] has the largest inner product.
+    assert results == [
+        [{"corpus_id": 1, "score": 2.0}, {"corpus_id": 0, "score": 1.0}],
+        [{"corpus_id": 2, "score": 3.0}, {"corpus_id": 1, "score": 2.0}],
+    ]
 
 
 @skip_without_faiss
