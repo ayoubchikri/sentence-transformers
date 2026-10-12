@@ -102,6 +102,8 @@ class CoSENTLoss(nn.Module):
         scores = scores * self.scale
         if scores.dtype in (torch.float16, torch.bfloat16):
             scores = scores.float()
+        if labels.dtype == torch.bool:
+            labels = labels.int()
 
         labels, order = labels.sort()
         scores = scores[order]

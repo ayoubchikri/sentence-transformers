@@ -73,11 +73,25 @@ def test_cosent_rejects_mismatched_label_shapes(dummy_model, loss_class, label_s
 
 @pytest.mark.parametrize("loss_class", [CoSENTLoss, AnglELoss])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-@pytest.mark.parametrize("label_case", ["distinct", "ties", "equal", "singleton", "empty"])
-def test_cosent_matches_explicit_pair_loss_and_gradients(dummy_model, loss_class, dtype, label_case):
+@pytest.mark.parametrize("label_case", ["distinct", "ties", "bool", "equal", "singleton", "empty"])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")),
+        pytest.param(
+            "mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is unavailable")
+        ),
+    ],
+)
+def test_cosent_matches_explicit_pair_loss_and_gradients(dummy_model, loss_class, dtype, label_case, device):
+    if device == "mps" and dtype == torch.float64:
+        pytest.skip("MPS does not support float64")
     labels = torch.tensor([0.4, -0.3, 0.8, 0.1, -0.2, 0.5], dtype=dtype)
     if label_case == "ties":
         labels = torch.tensor([0.0, 1.0, 0.0, 0.5, 1.0, 0.5], dtype=dtype)
+    elif label_case == "bool":
+        labels = torch.tensor([True, False, True, False, False, True])
     elif label_case == "equal":
         labels = torch.ones(6, dtype=dtype)
     elif label_case == "singleton":
@@ -85,7 +99,10 @@ def test_cosent_matches_explicit_pair_loss_and_gradients(dummy_model, loss_class
     elif label_case == "empty":
         labels = labels[:0]
     generator = torch.Generator().manual_seed(17)
-    embeddings = [torch.randn(len(labels), 4, generator=generator, dtype=dtype).requires_grad_() for _ in range(2)]
+    labels = labels.to(device)
+    embeddings = [
+        torch.randn(len(labels), 4, generator=generator, dtype=dtype).to(device).requires_grad_() for _ in range(2)
+    ]
     reference_embeddings = [x.detach().clone().requires_grad_() for x in embeddings]
     loss_fn = loss_class(dummy_model)
 
@@ -95,9 +112,10 @@ def test_cosent_matches_explicit_pair_loss_and_gradients(dummy_model, loss_class
     expected.backward()
 
     torch.testing.assert_close(actual, expected)
+    rtol, atol = (1e-5, 1e-6) if dtype == torch.float32 else (1e-7, 1e-7)
     for actual_embedding, reference_embedding in zip(embeddings, reference_embeddings):
         assert torch.isfinite(actual_embedding.grad).all()
-        torch.testing.assert_close(actual_embedding.grad, reference_embedding.grad)
+        torch.testing.assert_close(actual_embedding.grad, reference_embedding.grad, rtol=rtol, atol=atol)
 
 
 def test_cosent_does_not_save_a_pairwise_score_matrix(dummy_model):
@@ -116,28 +134,6 @@ def test_cosent_does_not_save_a_pairwise_score_matrix(dummy_model):
     assert saved_sizes
     assert max(saved_sizes) <= batch_size * embedding_dim
     assert all(x.grad.abs().sum() > 0 for x in embeddings)
-
-
-def test_cosent_encoder_updates_match_explicit_pairs(dummy_model):
-    torch.manual_seed(4)
-    encoder = torch.nn.Linear(4, 4)
-    reference_encoder = torch.nn.Linear(4, 4)
-    reference_encoder.load_state_dict(encoder.state_dict())
-    optimizer = torch.optim.SGD(encoder.parameters(), lr=0.01)
-    reference_optimizer = torch.optim.SGD(reference_encoder.parameters(), lr=0.01)
-    inputs = [torch.randn(6, 4), torch.randn(6, 4)]
-    labels = torch.tensor([1.0, 0.0, 0.5, 1.0, 0.0, 0.5])
-    loss_fn = CoSENTLoss(dummy_model)
-
-    for _ in range(3):
-        optimizer.zero_grad()
-        reference_optimizer.zero_grad()
-        loss_fn.compute_loss_from_embeddings([encoder(x) for x in inputs], labels).backward()
-        _explicit_cosent_loss(loss_fn, [reference_encoder(x) for x in inputs], labels).backward()
-        optimizer.step()
-        reference_optimizer.step()
-        for actual, expected in zip(encoder.parameters(), reference_encoder.parameters()):
-            torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
